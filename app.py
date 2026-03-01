@@ -32,7 +32,7 @@ def normalize_name(name):
     """Chuẩn hóa tên: strip, lower, NFC unicode, bỏ multi-space."""
     s = str(name).strip().lower()
     s = unicodedata.normalize('NFC', s)
-    s = ' '.join(s.split())  # bỏ multi-space
+    s = ' '.join(s.split())
     return s
 
 def export_individual_salary(emp_name, df_results, df_details):
@@ -48,38 +48,29 @@ def export_individual_salary(emp_name, df_results, df_details):
     df_det['Name'] = df_det['Name'].astype(str).str.strip()
     df_det['_name_norm'] = df_det['Name'].apply(normalize_name)
     
-    # Chuẩn hóa Date: nếu đã datetime thì normalize, nếu string thì parse
+    # Chuẩn hóa Date: dùng smart_parse rồi normalize
     if pd.api.types.is_datetime64_any_dtype(df_det['Date']):
         df_det['Date'] = df_det['Date'].dt.normalize()
     else:
-        # Parse string → datetime, KHÔNG dùng dayfirst vì không biết format
-        # Thử 2 cách, lấy cách nào hợp lý hơn
-        df_det['Date'] = pd.to_datetime(df_det['Date'], dayfirst=True, errors='coerce').dt.normalize()
+        df_det['Date'] = SalaryCalculator.smart_parse_dates(df_det['Date']).dt.normalize()
     
-    # --- TÌM NHÂN VIÊN: dùng normalized name ---
+    # --- TÌM NHÂN VIÊN ---
     emp_data = df_det[df_det['_name_norm'] == target_norm].copy()
-    match_method = f'normalized exact: "{target_norm}"'
     
     if emp_data.empty:
-        # Fallback: contains
         emp_data = df_det[df_det['_name_norm'].str.contains(target_norm, na=False, regex=False)].copy()
-        match_method = f'contains: "{target_norm}"'
     
     if emp_data.empty:
-        # Fallback: reverse contains
         mask = df_det['_name_norm'].apply(lambda x: x in target_norm or target_norm in x)
         emp_data = df_det[mask].copy()
-        match_method = f'reverse contains: "{target_norm}"'
     
     # --- XÁC ĐỊNH THÁNG từ dữ liệu của NV ---
-    date_source = 'employee'
     if not emp_data.empty and not emp_data['Date'].dropna().empty:
         emp_months = emp_data['Date'].dropna().dt.to_period('M')
         ref_period = emp_months.mode().iloc[0]
     elif not df_det['Date'].dropna().empty:
         all_months = df_det['Date'].dropna().dt.to_period('M')
         ref_period = all_months.mode().iloc[0]
-        date_source = 'all_employees (fallback)'
     else:
         return None
     
@@ -101,7 +92,6 @@ def export_individual_salary(emp_name, df_results, df_details):
         if col not in full_log.columns:
             full_log[col] = 0
     
-    # Xử lý cột hiển thị
     export_columns = {
         'Date': 'Ngày', 'Check-in': 'Giờ Vào', 'Check-out': 'Giờ Ra',
         'IsSunday': 'Chủ Nhật?', 'Late_Min': 'Trễ (Phút)', 'Early_Min': 'Sớm (Phút)',
@@ -113,7 +103,6 @@ def export_individual_salary(emp_name, df_results, df_details):
     display_log.rename(columns=export_columns, inplace=True)
     display_log['Ngày'] = display_log['Ngày'].dt.strftime('%d/%m/%Y')
     
-    # IsSunday tính lại từ Date gốc
     full_log['IsSunday'] = full_log['Date'].dt.weekday == 6
     display_log['Chủ Nhật?'] = full_log['IsSunday'].apply(lambda x: 'X' if x else '')
     
@@ -124,42 +113,10 @@ def export_individual_salary(emp_name, df_results, df_details):
     
     display_log['Ghi chú'] = full_log.apply(lambda r: '' if pd.notna(r.get('Check-in')) else 'Vắng/Thiếu dữ liệu', axis=1)
 
-    # --- DEBUG SHEET: để biết chuyện gì xảy ra nếu còn lỗi ---
-    debug_data = {
-        'Thông tin': [
-            'Tên tìm kiếm (target)',
-            'Tên chuẩn hóa (normalized)',
-            'Phương pháp match',
-            'Số dòng tìm được (emp_data)',
-            'Nguồn xác định tháng',
-            'Tháng xác định',
-            'Khoảng ngày',
-            'Tổng dòng trong df_details',
-            'Danh sách tên (unique) trong df_details',
-            'Sample Date dtype',
-            'Sample Date values (first 3)',
-        ],
-        'Giá trị': [
-            target_name,
-            target_norm,
-            match_method,
-            str(len(emp_data)),
-            date_source,
-            str(ref_period),
-            f'{min_date.strftime("%d/%m/%Y")} - {max_date.strftime("%d/%m/%Y")}',
-            str(len(df_det)),
-            ', '.join(df_det['Name'].unique()[:20].tolist()),
-            str(df_det['Date'].dtype),
-            str(df_det['Date'].dropna().head(3).tolist()),
-        ]
-    }
-    df_debug = pd.DataFrame(debug_data)
-
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         summary_row.to_excel(writer, index=False, sheet_name="Tổng hợp lương")
         display_log.to_excel(writer, index=False, sheet_name="Bảng chấm công chi tiết")
-        df_debug.to_excel(writer, index=False, sheet_name="Debug Info")
         
         workbook = writer.book
         worksheet = writer.sheets["Bảng chấm công chi tiết"]
@@ -169,7 +126,7 @@ def export_individual_salary(emp_name, df_results, df_details):
             
     return output.getvalue()
 
-# --- SIDEBAR / TABS ---
+# --- TABS ---
 tab1, tab2, tab3 = st.tabs(["🚀 Tính Lương", "👥 Cấu hình Nhân viên", "📊 Thống kê & Biểu đồ"])
 
 with tab2:
@@ -183,7 +140,7 @@ with tab2:
         use_container_width=True, 
         key="staff_editor",
         column_config={
-            "Group Order": st.column_config.NumberColumn("Group Order", help="Thứ tự hiển thị (Ví dụ: 1 cho Marketing, 2 cho Saleman...)", min_value=0, step=1),
+            "Group Order": st.column_config.NumberColumn("Group Order", help="Thứ tự hiển thị", min_value=0, step=1),
             "Revenue": st.column_config.NumberColumn("Revenue (Doanh thu)", help="Doanh thu bán hàng của Saleman trong tháng", min_value=0, format="%d")
         }
     )
@@ -238,20 +195,18 @@ with tab1:
                         st.session_state['temp_preview'] = df_to_process
                         st.success(f"✅ Đã nhận thành công {len(df_to_process)} dòng chấm công!")
 
-                        # --- PHÁT HIỆN SAI SÓT CHẤM CÔNG (IN == OUT) ---
                         anomalies = df_to_process[
                             (df_to_process['Check-in'].astype(str) == df_to_process['Check-out'].astype(str)) &
                             (df_to_process['Check-in'].astype(str).str.strip().isin(['', '-', '0:00', '00:00']) == False)
                         ]
                         
                         if not anomalies.empty:
-                            st.warning("⚠️ **Phát hiện sai sót chấm công:** Một số ngày có giờ Vào và Giờ Ra trùng nhau (có thể là quên chấm công).")
+                            st.warning("⚠️ **Phát hiện sai sót chấm công:** Một số ngày có giờ Vào và Giờ Ra trùng nhau.")
                             df_ano_display = anomalies[['Name', 'Date', 'Check-in', 'Check-out']].copy()
                             df_ano_display.columns = ['Nhân viên', 'Ngày', 'Vào', 'Ra']
                             st.dataframe(df_ano_display, use_container_width=True)
                             st.info("💡 Bạn nên kiểm tra lại các trường hợp trên trước khi tính lương.")
                         
-                        # --- PHÁT HIỆN LÀM KHÔNG ĐỦ 8 TIẾNG ---
                         df_check_hours = df_to_process.copy()
                         def quick_hour_check(row):
                             try:
@@ -274,11 +229,10 @@ with tab1:
                         ]
 
                         if not short_shifts.empty:
-                            st.warning("⚠️ **Cảnh báo làm thiếu giờ (< 8h):** Hệ thống ghi nhận các trường hợp làm không đủ 8 tiếng.")
+                            st.warning("⚠️ **Cảnh báo làm thiếu giờ (< 8h):**")
                             df_short_display = short_shifts[['Name', 'Date', 'Check-in', 'Check-out', 'Hrs']].copy()
                             df_short_display.columns = ['Nhân viên', 'Ngày', 'Vào', 'Ra', 'Số giờ tính được']
                             st.dataframe(df_short_display, use_container_width=True)
-                            st.info("💡 Ví dụ: Nếu nhân viên ra lúc 14:51, có thể Cam AI đã nhận nhầm khi họ đi ngang qua.")
                     
                     except Exception as e:
                         st.error(f"❌ Lỗi xử lý: {str(e)}")
