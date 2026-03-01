@@ -6,6 +6,7 @@ import io
 from datetime import datetime
 import plotly.express as px
 import calendar
+import unicodedata
 
 # Cấu hình file lưu trữ
 STAFF_FILE = "employees.csv"
@@ -17,7 +18,6 @@ st.title("🏯 Salary Calculation Tool - Dự án #Koi")
 def get_staff_data():
     if os.path.exists(STAFF_FILE):
         df = pd.read_csv(STAFF_FILE)
-        # Bổ sung các cột mới nếu chưa có
         if "Group Order" not in df.columns:
             df["Group Order"] = 0
         if "Revenue" not in df.columns:
@@ -28,102 +28,138 @@ def get_staff_data():
 def save_staff_data(df):
     df.to_csv(STAFF_FILE, index=False)
 
+def normalize_name(name):
+    """Chuẩn hóa tên: strip, lower, NFC unicode, bỏ multi-space."""
+    s = str(name).strip().lower()
+    s = unicodedata.normalize('NFC', s)
+    s = ' '.join(s.split())  # bỏ multi-space
+    return s
+
 def export_individual_salary(emp_name, df_results, df_details):
-    """Tạo file Excel chi tiết cho một nhân viên, chuẩn hóa dữ liệu để tránh lỗi vắng mặt."""
-    # 1. Chuẩn hóa tên để so khớp chính xác
+    """Tạo file Excel chi tiết cho một nhân viên."""
     target_name = str(emp_name).strip()
+    target_norm = normalize_name(target_name)
     
     # Lấy dòng tổng hợp
     summary_row = df_results[df_results['Tên'].astype(str).str.strip() == target_name]
     
-    # 2. Lấy dữ liệu chi tiết và chuẩn hóa ngày/tên
-    df_details = df_details.copy()
-    df_details['Name'] = df_details['Name'].astype(str).str.strip()
-    # Chuyển về datetime và bỏ phần giờ (normalize)
-    df_details['Date'] = pd.to_datetime(df_details['Date']).dt.normalize()
+    # Clone và chuẩn hóa
+    df_det = df_details.copy()
+    df_det['Name'] = df_det['Name'].astype(str).str.strip()
+    df_det['_name_norm'] = df_det['Name'].apply(normalize_name)
     
-    # --- FIX: Lọc theo tên nhân viên TRƯỚC, thử exact match rồi fallback contains ---
-    emp_data = df_details[df_details['Name'] == target_name].copy()
+    # Chuẩn hóa Date: nếu đã datetime thì normalize, nếu string thì parse
+    if pd.api.types.is_datetime64_any_dtype(df_det['Date']):
+        df_det['Date'] = df_det['Date'].dt.normalize()
+    else:
+        # Parse string → datetime, KHÔNG dùng dayfirst vì không biết format
+        # Thử 2 cách, lấy cách nào hợp lý hơn
+        df_det['Date'] = pd.to_datetime(df_det['Date'], dayfirst=True, errors='coerce').dt.normalize()
+    
+    # --- TÌM NHÂN VIÊN: dùng normalized name ---
+    emp_data = df_det[df_det['_name_norm'] == target_norm].copy()
+    match_method = f'normalized exact: "{target_norm}"'
     
     if emp_data.empty:
-        # Fallback: tìm bằng contains (phòng trường hợp tên có khoảng trắng/ký tự lạ)
-        emp_data = df_details[df_details['Name'].str.contains(target_name, case=False, na=False)].copy()
+        # Fallback: contains
+        emp_data = df_det[df_det['_name_norm'].str.contains(target_norm, na=False, regex=False)].copy()
+        match_method = f'contains: "{target_norm}"'
     
     if emp_data.empty:
-        # Fallback 2: Tìm ngược lại (target chứa trong Name)
-        for unique_name in df_details['Name'].unique():
-            if target_name in unique_name or unique_name in target_name:
-                emp_data = df_details[df_details['Name'] == unique_name].copy()
-                break
-
-    # --- FIX: Xác định khoảng thời gian từ dữ liệu CỦA NHÂN VIÊN, không phải toàn bộ ---
+        # Fallback: reverse contains
+        mask = df_det['_name_norm'].apply(lambda x: x in target_norm or target_norm in x)
+        emp_data = df_det[mask].copy()
+        match_method = f'reverse contains: "{target_norm}"'
+    
+    # --- XÁC ĐỊNH THÁNG từ dữ liệu của NV ---
+    date_source = 'employee'
     if not emp_data.empty and not emp_data['Date'].dropna().empty:
-        # Lấy tháng phổ biến nhất trong dữ liệu của nhân viên
         emp_months = emp_data['Date'].dropna().dt.to_period('M')
-        ref_period = emp_months.mode()[0]
-        min_date = ref_period.start_time.normalize()
-        last_day = calendar.monthrange(min_date.year, min_date.month)[1]
-        max_date = min_date.replace(day=last_day)
-    elif not df_details['Date'].dropna().empty:
-        # Fallback cuối: dùng tháng phổ biến nhất trong toàn bộ dữ liệu
-        all_months = df_details['Date'].dropna().dt.to_period('M')
-        ref_period = all_months.mode()[0]
-        min_date = ref_period.start_time.normalize()
-        last_day = calendar.monthrange(min_date.year, min_date.month)[1]
-        max_date = min_date.replace(day=last_day)
+        ref_period = emp_months.mode().iloc[0]
+    elif not df_det['Date'].dropna().empty:
+        all_months = df_det['Date'].dropna().dt.to_period('M')
+        ref_period = all_months.mode().iloc[0]
+        date_source = 'all_employees (fallback)'
     else:
         return None
-
-    # Tạo dải ngày đầy đủ trong tháng (đã chuẩn hóa 00:00:00)
+    
+    min_date = ref_period.start_time.normalize()
+    last_day = calendar.monthrange(min_date.year, min_date.month)[1]
+    max_date = min_date.replace(day=last_day)
+    
+    # Tạo dải ngày đầy đủ
     all_days = pd.date_range(start=min_date, end=max_date).normalize()
     all_days_df = pd.DataFrame({'Date': all_days})
     
-    # Merge dữ liệu (On Date)
+    # Merge
     full_log = pd.merge(all_days_df, emp_data, on='Date', how='left')
     
-    # Xử lý các cột hiển thị
-    export_columns = {
-        'Date': 'Ngày',
-        'Check-in': 'Giờ Vào',
-        'Check-out': 'Giờ Ra',
-        'IsSunday': 'Chủ Nhật?',
-        'Late_Min': 'Trễ (Phút)',
-        'Early_Min': 'Sớm (Phút)',
-        'OT_Hours': 'OT (Giờ)',
-        'Work_Day': 'Công',
-        'Daily_Pay': 'Lương Ngày',
-        'Sunday_Bonus': 'Thưởng CN',
-        'Penalty_Amt': 'Tiền Phạt',
-        'OT_Amt': 'Tiền OT'
-    }
-    
-    # Đảm bảo tất cả cột tồn tại trước khi select
-    for col in export_columns.keys():
+    # Đảm bảo tất cả cột tồn tại
+    required_cols = ['Check-in', 'Check-out', 'IsSunday', 'Late_Min', 'Early_Min', 
+                     'OT_Hours', 'Work_Day', 'Daily_Pay', 'Sunday_Bonus', 'Penalty_Amt', 'OT_Amt']
+    for col in required_cols:
         if col not in full_log.columns:
-            full_log[col] = None
+            full_log[col] = 0
+    
+    # Xử lý cột hiển thị
+    export_columns = {
+        'Date': 'Ngày', 'Check-in': 'Giờ Vào', 'Check-out': 'Giờ Ra',
+        'IsSunday': 'Chủ Nhật?', 'Late_Min': 'Trễ (Phút)', 'Early_Min': 'Sớm (Phút)',
+        'OT_Hours': 'OT (Giờ)', 'Work_Day': 'Công', 'Daily_Pay': 'Lương Ngày',
+        'Sunday_Bonus': 'Thưởng CN', 'Penalty_Amt': 'Tiền Phạt', 'OT_Amt': 'Tiền OT'
+    }
     
     display_log = full_log[list(export_columns.keys())].copy()
     display_log.rename(columns=export_columns, inplace=True)
-    
-    # Định dạng hiển thị
     display_log['Ngày'] = display_log['Ngày'].dt.strftime('%d/%m/%Y')
     
-    # Tính lại IsSunday từ cột Date gốc (không bị ảnh hưởng bởi merge NaN)
+    # IsSunday tính lại từ Date gốc
     full_log['IsSunday'] = full_log['Date'].dt.weekday == 6
-    display_log['Chủ Nhật?'] = full_log['IsSunday'].apply(lambda x: 'X' if x == True else '')
+    display_log['Chủ Nhật?'] = full_log['IsSunday'].apply(lambda x: 'X' if x else '')
     
     num_cols = ['Trễ (Phút)', 'Sớm (Phút)', 'OT (Giờ)', 'Công', 'Lương Ngày', 'Thưởng CN', 'Tiền Phạt', 'Tiền OT']
     for col in num_cols:
         if col in display_log.columns:
             display_log[col] = display_log[col].fillna(0)
     
-    # Ghi chú: Nếu không có giờ vào/ra thì coi là vắng
     display_log['Ghi chú'] = full_log.apply(lambda r: '' if pd.notna(r.get('Check-in')) else 'Vắng/Thiếu dữ liệu', axis=1)
+
+    # --- DEBUG SHEET: để biết chuyện gì xảy ra nếu còn lỗi ---
+    debug_data = {
+        'Thông tin': [
+            'Tên tìm kiếm (target)',
+            'Tên chuẩn hóa (normalized)',
+            'Phương pháp match',
+            'Số dòng tìm được (emp_data)',
+            'Nguồn xác định tháng',
+            'Tháng xác định',
+            'Khoảng ngày',
+            'Tổng dòng trong df_details',
+            'Danh sách tên (unique) trong df_details',
+            'Sample Date dtype',
+            'Sample Date values (first 3)',
+        ],
+        'Giá trị': [
+            target_name,
+            target_norm,
+            match_method,
+            str(len(emp_data)),
+            date_source,
+            str(ref_period),
+            f'{min_date.strftime("%d/%m/%Y")} - {max_date.strftime("%d/%m/%Y")}',
+            str(len(df_det)),
+            ', '.join(df_det['Name'].unique()[:20].tolist()),
+            str(df_det['Date'].dtype),
+            str(df_det['Date'].dropna().head(3).tolist()),
+        ]
+    }
+    df_debug = pd.DataFrame(debug_data)
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         summary_row.to_excel(writer, index=False, sheet_name="Tổng hợp lương")
         display_log.to_excel(writer, index=False, sheet_name="Bảng chấm công chi tiết")
+        df_debug.to_excel(writer, index=False, sheet_name="Debug Info")
         
         workbook = writer.book
         worksheet = writer.sheets["Bảng chấm công chi tiết"]
@@ -169,15 +205,11 @@ with tab1:
             
             df_to_process = None
 
-            # Tạo một bảng trống 200 dòng, 100 cột để dán
             if 'paste_buffer' not in st.session_state:
                 cols = ['ID', 'Tên', 'Chức vụ', 'Phòng ban', 'Mã NV']
-                # Tạo nhãn cho các cột còn lại
                 for i in range(1, 96): 
                     cols.append(f"Cột {i}")
-                
                 final_cols = cols[:100]
-                
                 st.session_state['paste_buffer'] = pd.DataFrame(
                     [["" for _ in range(100)] for _ in range(200)],
                     columns=final_cols
@@ -198,18 +230,15 @@ with tab1:
             
             if st.button("📥 Xác nhận dữ liệu đã dán"):
                 df_clean = df_pasted.replace('', pd.NA).dropna(how='all', axis=0)
-                # Giữ lại các cột có dữ liệu
                 df_clean = df_clean.dropna(how='all', axis=1)
                 
                 if not df_clean.empty:
                     try:
-                        # GỌI TRỰC TIẾP HÀM XỬ LÝ DF - KHÔNG QUA TRUNG GIAN
                         df_to_process = SalaryCalculator.process_dataframe(df_clean)
                         st.session_state['temp_preview'] = df_to_process
                         st.success(f"✅ Đã nhận thành công {len(df_to_process)} dòng chấm công!")
 
                         # --- PHÁT HIỆN SAI SÓT CHẤM CÔNG (IN == OUT) ---
-                        # Chuyển về chuỗi để so sánh
                         anomalies = df_to_process[
                             (df_to_process['Check-in'].astype(str) == df_to_process['Check-out'].astype(str)) &
                             (df_to_process['Check-in'].astype(str).str.strip().isin(['', '-', '0:00', '00:00']) == False)
@@ -217,16 +246,13 @@ with tab1:
                         
                         if not anomalies.empty:
                             st.warning("⚠️ **Phát hiện sai sót chấm công:** Một số ngày có giờ Vào và Giờ Ra trùng nhau (có thể là quên chấm công).")
-                            # Rút gọn danh sách cho dễ nhìn
                             df_ano_display = anomalies[['Name', 'Date', 'Check-in', 'Check-out']].copy()
                             df_ano_display.columns = ['Nhân viên', 'Ngày', 'Vào', 'Ra']
                             st.dataframe(df_ano_display, use_container_width=True)
                             st.info("💡 Bạn nên kiểm tra lại các trường hợp trên trước khi tính lương.")
                         
-                        # --- PHÁT HIỆN LÀM KHÔNG ĐỦ 8 TIẾNG (Nghi ngờ lỗi Cam AI) ---
-                        # Chỉ kiểm tra những dòng không nằm trong nhóm In == Out ở trên
+                        # --- PHÁT HIỆN LÀM KHÔNG ĐỦ 8 TIẾNG ---
                         df_check_hours = df_to_process.copy()
-                        # Tính toán giờ làm sơ bộ để cảnh báo (Sử dụng logic tạm tính)
                         def quick_hour_check(row):
                             try:
                                 t_in = pd.to_datetime(row['Check-in'], format='%H:%M').time()
@@ -234,7 +260,7 @@ with tab1:
                                 dt_in = datetime.combine(datetime.min, t_in)
                                 dt_out = datetime.combine(datetime.min, t_out)
                                 hours = (dt_out - dt_in).total_seconds() / 3600
-                                if hours > 5: # Chỉ trừ trưa nếu làm trên 5 tiếng
+                                if hours > 5:
                                     hours -= 1
                                 return hours
                             except:
@@ -248,7 +274,7 @@ with tab1:
                         ]
 
                         if not short_shifts.empty:
-                            st.warning("⚠️ **Cảnh báo làm thiếu giờ (< 8h):** Hệ thống ghi nhận các trường hợp làm không đủ 8 tiếng. Hãy kiểm tra xem có phải do Cam AI nhận nhầm giờ ra không.")
+                            st.warning("⚠️ **Cảnh báo làm thiếu giờ (< 8h):** Hệ thống ghi nhận các trường hợp làm không đủ 8 tiếng.")
                             df_short_display = short_shifts[['Name', 'Date', 'Check-in', 'Check-out', 'Hrs']].copy()
                             df_short_display.columns = ['Nhân viên', 'Ngày', 'Vào', 'Ra', 'Số giờ tính được']
                             st.dataframe(df_short_display, use_container_width=True)
@@ -289,29 +315,22 @@ with tab1:
         st.divider()
         st.header("3. Kết quả Bảng lương")
         
-        # Merge với thông tin staff để lấy Group Order và sắp xếp
         df_staff_info = get_staff_data()[['Name', 'Group Order']].rename(columns={'Name': 'Tên'}).drop_duplicates()
         df_results = pd.merge(st.session_state['salary_results'], df_staff_info, on='Tên', how='left')
-        
-        # Sắp xếp theo Group Order rồi mới đến Tên
         df_results = df_results.sort_values(by=['Group Order', 'Tên']).reset_index(drop=True)
         
-        # Tạo bản sao để hiển thị (định dạng dấu chấm phân cách hàng ngàn)
         df_display = df_results.copy()
         money_cols = ["Lương Cơ Bản", "Doanh Thu", "Hoa Hồng", "Lương Ngày Thường", "Lương Chủ Nhật", "Tiền OT", "Phạt (Trễ/Sớm)", "Tổng Thực Lãnh"]
         
         for col in money_cols:
             if col in df_display.columns:
-                # Chuyển số thành chuỗi có dấu chấm phân cách: 1.000.000
                 df_display[col] = df_display[col].apply(lambda x: f"{int(x):,d}".replace(",", ".") if pd.notna(x) else "0")
         
-        # Định dạng ngày/giờ công
         metric_col = "Ngày công/Giờ công"
         if metric_col in df_display.columns:
             df_display[metric_col] = df_display[metric_col].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "0.0")
 
         if not df_display.empty:
-            # Lấy danh sách các group duy nhất để hiển thị
             groups = sorted(df_display['Group Order'].unique())
             
             for g in groups:
@@ -322,16 +341,13 @@ with tab1:
                 df_group = df_display[df_display['Group Order'] == g].reset_index(drop=True)
                 is_sales_group = any(df_group['Chức vụ'] == 'Saleman')
 
-                # Cấu hình Layout khác nhau tùy theo là Saleman hay không
                 if is_sales_group:
                     col_widths = [1.5, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.0, 1.2, 0.8]
                     fields = ["Tên", "Chức vụ", "Lương CB", "Doanh thu", "Hoa hồng", "Công/Giờ", "Lương", "Lương CN", "Tiền OT", "Phạt", "Chi tiết"]
                 else:
-                    # Bỏ "Doanh thu" và "Hoa hồng" (cột index 3 và 4)
                     col_widths = [1.5, 1.2, 1.5, 1.2, 1.5, 1.2, 1.2, 1.5, 0.8]
                     fields = ["Tên", "Chức vụ", "Lương CB", "Công/Giờ", "Lương", "Lương CN", "Tiền OT", "Phạt", "Chi tiết"]
                 
-                # Header lặp lại
                 header_cols = st.columns(col_widths)
                 for i, f in enumerate(fields):
                     header_cols[i].markdown(f"<p style='font-size: 0.75em; font-weight: bold; color: gray;'>{f}</p>", unsafe_allow_html=True)
@@ -362,7 +378,6 @@ with tab1:
                         row_cols[7].write(row['Phạt (Trễ/Sớm)'])
                         btn_idx = 8
                     
-                    # Nút xuất chi tiết
                     with row_cols[btn_idx]:
                         excel_data = export_individual_salary(
                             row['Tên'], 
@@ -378,25 +393,20 @@ with tab1:
                                 key=f"dl_{row['Tên']}_{idx}_{g}"
                             )
                         else:
-                            st.warning("⚠️")
-                    # Show Total below
+                            st.write("⚠️")
                     st.markdown(f"<div style='text-align: right; font-weight: bold; color: #ff4b4b;'>Tổng Lãnh: {row['Tổng Thực Lãnh']}</div>", unsafe_allow_html=True)
                     st.divider()
             
-            # --- BÁO CÁO TỔNG KẾT CHI PHÍ TOÀN CÔNG TY ---
+            # --- BÁO CÁO TỔNG KẾT ---
             st.markdown("## 📈 Báo cáo Tổng kết Chi phí")
             
-            # Tính toán tổng tất cả các cột
             grand_total_base = df_results['Lương Ngày Thường'].sum()
             grand_total_sunday = df_results['Lương Chủ Nhật'].sum()
             grand_total_ot = df_results['Tiền OT'].sum()
             grand_total_penalty = df_results['Phạt (Trễ/Sớm)'].sum()
             grand_total_income = df_results['Tổng Thực Lãnh'].sum()
-            
-            # Kiểm tra xem có cột Hoa hồng không (Saleman)
             grand_total_commission = df_results['Hoa Hồng'].sum() if 'Hoa Hồng' in df_results.columns else 0
 
-            # Hiển thị Metrics chính
             m1, m2, m3 = st.columns(3)
             with m1:
                 st.metric("TỔNG QUỸ LƯƠNG TRẢ", f"{grand_total_income:,.0f} đ")
@@ -405,7 +415,6 @@ with tab1:
             with m3:
                 st.metric("Tổng tiền phạt", f"{grand_total_penalty:,.0f} đ", delta_color="inverse")
 
-            # Bảng tổng hợp chi tiết
             summary_data = {
                 "Hạng mục chi phí": [
                     "1. Lương ngày công thường",
@@ -426,7 +435,6 @@ with tab1:
             }
             st.table(pd.DataFrame(summary_data))
             
-            # Nút xuất tất cả kết quả ra một file Excel chung
             output_total = io.BytesIO()
             with pd.ExcelWriter(output_total, engine='xlsxwriter') as writer:
                 df_results.to_excel(writer, index=False, sheet_name="Bang_Luong_Tong_Hop")
@@ -451,22 +459,16 @@ with tab1:
             col_chart1, col_chart2 = st.columns(2)
             
             with col_chart1:
-                # 1. Chart: Tổng lương theo Chức vụ
                 st.subheader("💰 Phân bổ theo Chức vụ")
                 fig_role = px.pie(
-                    df_res, 
-                    values='Tổng Thực Lãnh', 
-                    names='Chức vụ',
-                    hole=0.4,
-                    color_discrete_sequence=px.colors.qualitative.Pastel
+                    df_res, values='Tổng Thực Lãnh', names='Chức vụ',
+                    hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel
                 )
                 fig_role.update_layout(margin=dict(t=0, b=0, l=0, r=0))
                 st.plotly_chart(fig_role, use_container_width=True)
             
             with col_chart2:
-                # 2. Chart: Cơ cấu thu nhập (Stacked Bar)
                 st.subheader("🧩 Cơ cấu Thu nhập")
-                # Chuẩn bị dữ liệu cho biểu đồ cột chồng
                 comp_data = []
                 for _, row in df_res.iterrows():
                     comp_data.append({'Nhân viên': row['Tên'], 'Loại': 'Lương cứng', 'Số tiền': row['Lương Ngày Thường']})
@@ -483,15 +485,11 @@ with tab1:
                 fig_comp.update_layout(xaxis_tickangle=-45, margin=dict(t=20, b=0, l=0, r=0))
                 st.plotly_chart(fig_comp, use_container_width=True)
             
-            # 3. Chart: Chi phí theo ngày (Biến động trong tháng)
             st.subheader("📅 Biến động chi phí theo ngày")
-            # Tính tổng chi phí từng ngày từ dữ liệu chi tiết
             df_det_copy = df_det.copy()
             df_det_copy['Date'] = pd.to_datetime(df_det_copy['Date'])
             df_daily = df_det_copy.groupby('Date').agg({
-                'Daily_Pay': 'sum',
-                'OT_Amt': 'sum',
-                'Sunday_Bonus': 'sum'
+                'Daily_Pay': 'sum', 'OT_Amt': 'sum', 'Sunday_Bonus': 'sum'
             }).reset_index()
             
             df_daily['Tổng chi phí'] = df_daily['Daily_Pay'] + df_daily['OT_Amt'] + df_daily['Sunday_Bonus']
@@ -505,7 +503,6 @@ with tab1:
             fig_daily.update_layout(hovermode="x unified")
             st.plotly_chart(fig_daily, use_container_width=True)
             
-            # --- Metrics tóm tắt ---
             st.divider()
             m1, m2, m3, m4 = st.columns(4)
             total_fund = df_res['Tổng Thực Lãnh'].sum()
@@ -529,8 +526,7 @@ with tab1:
             - **Saleman**: Tính lương trực tiếp = (Giờ Out - Giờ In) * Đơn giá giờ.
             """)
         
-        # Prepare final data for download (sorted)
-        if 'salary_results' in st.session_state:
+        if 'salary_results' in st.session_state and not st.session_state['salary_results'].empty:
             df_staff_info = get_staff_data()[['Name', 'Group Order']].rename(columns={'Name': 'Tên'}).drop_duplicates()
             df_final_to_save = pd.merge(st.session_state['salary_results'], df_staff_info, on='Tên', how='left')
             df_final_to_save = df_final_to_save.sort_values(by=['Group Order', 'Tên'])
