@@ -393,13 +393,40 @@ with tab1:
             with pd.ExcelWriter(output_total, engine='xlsxwriter') as writer:
                 df_results.to_excel(writer, index=False, sheet_name="Bang_Luong_Tong_Hop")
             
-            st.download_button(
-                label="📥 Tải xuống Bảng lương Tổng hợp (Tất cả nhân viên)",
-                data=output_total.getvalue(),
-                file_name=f"Bang_luong_tong_hop_{datetime.now().strftime('%Y%m')}.xlsx",
-                mime="application/vnd.ms-excel",
-                use_container_width=True
-            )
+            dl_col1, dl_col2 = st.columns(2)
+            with dl_col1:
+                st.download_button(
+                    label="📥 Tải Bảng lương Tổng hợp (.xlsx)",
+                    data=output_total.getvalue(),
+                    file_name=f"Bang_luong_tong_hop_{datetime.now().strftime('%Y%m')}.xlsx",
+                    mime="application/vnd.ms-excel",
+                    use_container_width=True
+                )
+            with dl_col2:
+                # --- NÚT XUẤT TẤT CẢ CHI TIẾT VÀO 1 FILE ZIP ---
+                import zipfile
+                zip_buffer = io.BytesIO()
+                month_str = datetime.now().strftime('%Y%m')
+                employee_names = st.session_state['salary_results']['Tên'].unique()
+                
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    for emp_name in employee_names:
+                        excel_data = export_individual_salary(
+                            emp_name,
+                            st.session_state['salary_results'],
+                            st.session_state['salary_details']
+                        )
+                        if excel_data:
+                            safe_name = emp_name.replace('/', '_').replace('\\', '_')
+                            zf.writestr(f"Chi_tiet_{safe_name}_{month_str}.xlsx", excel_data)
+                
+                st.download_button(
+                    label="📦 Tải ALL chi tiết từng NV (.zip)",
+                    data=zip_buffer.getvalue(),
+                    file_name=f"Chi_tiet_tat_ca_NV_{month_str}.zip",
+                    mime="application/zip",
+                    use_container_width=True
+                )
         else:
             st.info("Chưa có kết quả tính toán.")
             
