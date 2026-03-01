@@ -17,6 +17,31 @@ class SalaryCalculator:
         self.df_final = None
 
     @staticmethod
+    def smart_parse_dates(series):
+        """
+        Parse cột Date thông minh:
+        - Nếu đã là datetime → giữ nguyên
+        - Nếu format YYYY-MM-DD (ISO) → KHÔNG dùng dayfirst (tránh đảo ngày/tháng)
+        - Nếu format DD-MM-YYYY hoặc DD/MM/YYYY → dùng dayfirst=True
+        """
+        if pd.api.types.is_datetime64_any_dtype(series):
+            return series
+        
+        # Lấy sample để detect format
+        sample_values = series.dropna().astype(str).head(10)
+        if sample_values.empty:
+            return pd.to_datetime(series, errors='coerce')
+        
+        sample = sample_values.iloc[0].strip()
+        
+        # Detect: nếu bắt đầu bằng 4 chữ số → YYYY-... → ISO format
+        if len(sample) >= 4 and sample[:4].isdigit() and int(sample[:4]) > 1900:
+            return pd.to_datetime(series, dayfirst=False, errors='coerce')
+        else:
+            # DD-MM-YYYY hoặc DD/MM/YYYY → dayfirst
+            return pd.to_datetime(series, dayfirst=True, errors='coerce')
+
+    @staticmethod
     def parse_pasted_text(text):
         """
         Xử lý dữ liệu văn bản được dán từ Hanet/Excel (thường là Tab-separated).
@@ -26,9 +51,7 @@ class SalaryCalculator:
             return pd.DataFrame()
         
         try:
-            # Ưu tiên đọc dạng Tab (vì copy từ Excel/Web thường là Tab)
             df = pd.read_csv(io.StringIO(text), sep='\t', header=None)
-            # Nếu chỉ có 1 cột, thử đọc bằng dấu phẩy
             if df.shape[1] == 1:
                 df = pd.read_csv(io.StringIO(text), sep=',', header=None)
         except:
@@ -73,6 +96,11 @@ class SalaryCalculator:
         for j in range(len(df_raw.columns)):
             val = str(df_raw.iloc[header_row_idx, j])
             if any(char.isdigit() for char in val) and ('-' in val or '/' in val):
+                start_time_col = int(j)
+                break
+            # Cũng check nếu cột header là datetime object
+            raw_val = df_raw.iloc[header_row_idx, j]
+            if isinstance(raw_val, datetime):
                 start_time_col = int(j)
                 break
         
@@ -123,7 +151,6 @@ class SalaryCalculator:
                 check_in = row_data[int(c)]
                 check_out = row_data[int(c) + 1]
                 
-                # Hàm kiểm tra ô có dữ liệu thật sự không
                 def is_valid(v):
                     if pd.isna(v): return False
                     s = str(v).strip().lower()
@@ -158,7 +185,6 @@ class SalaryCalculator:
             if isinstance(t, datetime): return t.time()
             
             t_str = str(t).strip()
-            # Thử các định dạng phổ biến
             formats = ["%H:%M", "%H:%M:%S", "%I:%M %p", "%I:%M:%S %p", "%H:%M "]
             for fmt in formats:
                 try:
@@ -166,7 +192,6 @@ class SalaryCalculator:
                 except:
                     continue
             
-            # Trường hợp đặc biệt: 9:0 -> 09:00
             try:
                 if ':' in t_str:
                     parts = t_str.split(':')
@@ -179,8 +204,9 @@ class SalaryCalculator:
             return None
 
         # Pre-processing
-        # Ép buộc dùng dayfirst=True để ưu tiên định dạng Ngày/Tháng/Năm (Việt Nam)
-        self.df['Date'] = pd.to_datetime(self.df['Date'], dayfirst=True, errors='coerce')
+        # FIX: Dùng smart_parse_dates thay vì dayfirst=True cứng
+        # process_dataframe tạo Date dạng YYYY-MM-DD → KHÔNG được dùng dayfirst=True
+        self.df['Date'] = SalaryCalculator.smart_parse_dates(self.df['Date'])
         self.df['IsSunday'] = self.df['Date'].dt.weekday == 6
         self.df['InTime'] = self.df['Check-in'].apply(safe_time_parse)
         self.df['OutTime'] = self.df['Check-out'].apply(safe_time_parse)
@@ -197,11 +223,10 @@ class SalaryCalculator:
             base = row['Base Salary']
             s_type = row['Salary Type']
             
-            # Mặc định kết quả
             res = {
                 'Late_Min': 0, 'Early_Min': 0, 'OT_Hours': 0, 'Work_Hours': 0, 
                 'Work_Day': 0, 'Penalty_Amt': 0, 'OT_Amt': 0, 'Daily_Pay': 0,
-                'Sunday_Bonus': 0 # Cột mới để chứa phần tiền cộng thêm
+                'Sunday_Bonus': 0
             }
 
             if in_t is None or out_t is None:
@@ -213,16 +238,14 @@ class SalaryCalculator:
             t_out = datetime.combine(datetime.min, out_t)
             duration = (t_out - t_in).total_seconds() / 3600
             
-            # Chỉ trừ nghỉ trưa nếu KHÔNG PHẢI Saleman
             if role != 'Saleman':
                 if in_t < LUNCH_START and out_t > LUNCH_END:
-                    duration -= 1 # Trừ 1 tiếng nghỉ trưa
+                    duration -= 1
                     
             res['Work_Hours'] = max(0, duration)
 
-            # 2. Tính Đi trễ / Về sớm (Áp dụng cho Thợ và Marketing)
+            # 2. Tính Đi trễ / Về sớm
             if role in ['Thợ thủ công', 'Thợ thủ công tập sự', 'Marketing']:
-                # Đặc cách cho Tường Photo bắt đầu lúc 14h
                 actual_start = time(14, 0) if "Tường Photo" in str(row['Name']) else START_TIME
                 
                 if in_t > actual_start:
@@ -230,7 +253,7 @@ class SalaryCalculator:
                 if out_t < END_TIME:
                     res['Early_Min'] = (datetime.combine(datetime.min, END_TIME) - datetime.combine(datetime.min, out_t)).total_seconds() / 60
 
-            # 3. Tính OT (Chỉ tính nếu > 18:30 và không phải CN)
+            # 3. Tính OT
             if role in ['Thợ thủ công', 'Thợ thủ công tập sự'] and not row['IsSunday']:
                 if out_t > OT_START:
                     res['OT_Hours'] = (datetime.combine(datetime.min, out_t) - datetime.combine(datetime.min, OT_START)).total_seconds() / 3600
@@ -244,10 +267,8 @@ class SalaryCalculator:
             res['Penalty_Amt'] = (res['Late_Min'] + res['Early_Min']) * (hourly_rate / 60)
             res['OT_Amt'] = res['OT_Hours'] * hourly_rate * 1.2
             
-            # Tính lương ngày và thưởng Chủ Nhật
-            res['Work_Day'] = 1 # Luôn đếm là 1 công hễ có đi làm
+            res['Work_Day'] = 1
             
-            # Lương gốc cơ bản cho 1 ngày công
             if s_type == 'Tháng':
                 res['Daily_Pay'] = base / self.standard_days
             elif s_type == 'Ngày':
@@ -255,9 +276,8 @@ class SalaryCalculator:
             elif s_type == 'Giờ':
                 res['Daily_Pay'] = res['Work_Hours'] * base
 
-            # Nếu là Chủ Nhật, tính phần THƯỞNG THÊM (100% nữa để thành 200%)
             if row['IsSunday'] and role in ['Thợ thủ công', 'Thợ thủ công tập sự']:
-                res['Sunday_Bonus'] = res['Daily_Pay'] # Cộng thêm đúng bằng 1 ngày lương
+                res['Sunday_Bonus'] = res['Daily_Pay']
             else:
                 res['Sunday_Bonus'] = 0
             
@@ -270,13 +290,11 @@ class SalaryCalculator:
         """Tổng hợp lương tháng."""
         if self.df_final is None: return None
         
-        # Fill NaN để ko bị mất dữ liệu khi group
         df_safe = self.df_final.fillna({'Role': 'Unknown', 'Base Salary': 0, 'Salary Type': 'Unknown', 'Revenue': 0})
         
         grouped = df_safe.groupby(['Name', 'Role', 'Base Salary', 'Salary Type', 'Revenue'])
         summary = []
 
-        # Lấy danh sách tất cả các ngày Thứ 7 có trong dữ liệu tháng này
         all_dates = pd.to_datetime(self.df_final['Date'].dropna().unique())
         all_saturdays = all_dates[all_dates.weekday == 5]
 
@@ -287,23 +305,20 @@ class SalaryCalculator:
             total_ot = group['OT_Amt'].sum()
             total_sunday_bonus = group['Sunday_Bonus'].sum()
             
-            # Lương ngày thường
             base_earned = group['Daily_Pay'].sum()
             work_metric = group['Work_Day'].sum() if role not in ['Saleman', 'Intern'] else group['Work_Hours'].sum()
 
-            # --- XỬ LÝ TRƯỜNG HỢP ĐẶC BIỆT: Tường Photo ---
-            # Đặc cách nghỉ Thứ 7 vẫn tính lương (cộng bù công nếu vắng)
+            # Đặc cách Tường Photo
             if "Tường Photo" in str(name):
                 worked_dates = pd.to_datetime(group['Date']).dt.date.unique()
                 for sat in all_saturdays:
                     if sat.date() not in worked_dates:
-                        # Cộng bù 1 ngày lương
                         day_val = (base / self.standard_days) if s_type == 'Tháng' else base
                         base_earned += day_val
                         if role not in ['Saleman', 'Intern']:
                             work_metric += 1
             
-            # --- TÍNH HOA HỒNG (Chỉ áp dụng cho Saleman) ---
+            # Hoa hồng Saleman
             commission = 0
             if role == 'Saleman' and revenue >= 80_000_000:
                 if revenue <= 120_000_000:
