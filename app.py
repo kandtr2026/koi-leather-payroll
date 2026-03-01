@@ -42,14 +42,33 @@ def export_individual_salary(emp_name, df_results, df_details):
     # Chuyển về datetime và bỏ phần giờ (normalize)
     df_details['Date'] = pd.to_datetime(df_details['Date']).dt.normalize()
     
+    # --- FIX: Lọc theo tên nhân viên TRƯỚC, thử exact match rồi fallback contains ---
     emp_data = df_details[df_details['Name'] == target_name].copy()
     
-    # Xác định khoảng thời gian (cả tháng) dựa trên dữ liệu hiện có
-    if not df_details['Date'].empty:
-        # Lấy tháng từ ngày phổ biến nhất hoặc ngày đầu tiên trong dữ liệu
-        ref_date = df_details['Date'].iloc[0]
-        min_date = ref_date.replace(day=1)
-        import calendar
+    if emp_data.empty:
+        # Fallback: tìm bằng contains (phòng trường hợp tên có khoảng trắng/ký tự lạ)
+        emp_data = df_details[df_details['Name'].str.contains(target_name, case=False, na=False)].copy()
+    
+    if emp_data.empty:
+        # Fallback 2: Tìm ngược lại (target chứa trong Name)
+        for unique_name in df_details['Name'].unique():
+            if target_name in unique_name or unique_name in target_name:
+                emp_data = df_details[df_details['Name'] == unique_name].copy()
+                break
+
+    # --- FIX: Xác định khoảng thời gian từ dữ liệu CỦA NHÂN VIÊN, không phải toàn bộ ---
+    if not emp_data.empty and not emp_data['Date'].dropna().empty:
+        # Lấy tháng phổ biến nhất trong dữ liệu của nhân viên
+        emp_months = emp_data['Date'].dropna().dt.to_period('M')
+        ref_period = emp_months.mode()[0]
+        min_date = ref_period.start_time.normalize()
+        last_day = calendar.monthrange(min_date.year, min_date.month)[1]
+        max_date = min_date.replace(day=last_day)
+    elif not df_details['Date'].dropna().empty:
+        # Fallback cuối: dùng tháng phổ biến nhất trong toàn bộ dữ liệu
+        all_months = df_details['Date'].dropna().dt.to_period('M')
+        ref_period = all_months.mode()[0]
+        min_date = ref_period.start_time.normalize()
         last_day = calendar.monthrange(min_date.year, min_date.month)[1]
         max_date = min_date.replace(day=last_day)
     else:
@@ -78,22 +97,28 @@ def export_individual_salary(emp_name, df_results, df_details):
         'OT_Amt': 'Tiền OT'
     }
     
+    # Đảm bảo tất cả cột tồn tại trước khi select
+    for col in export_columns.keys():
+        if col not in full_log.columns:
+            full_log[col] = None
+    
     display_log = full_log[list(export_columns.keys())].copy()
     display_log.rename(columns=export_columns, inplace=True)
     
     # Định dạng hiển thị
     display_log['Ngày'] = display_log['Ngày'].dt.strftime('%d/%m/%Y')
     
-    # Tính lại IsSunday từ cột Ngày nếu merge bị NaN
+    # Tính lại IsSunday từ cột Date gốc (không bị ảnh hưởng bởi merge NaN)
     full_log['IsSunday'] = full_log['Date'].dt.weekday == 6
     display_log['Chủ Nhật?'] = full_log['IsSunday'].apply(lambda x: 'X' if x == True else '')
     
     num_cols = ['Trễ (Phút)', 'Sớm (Phút)', 'OT (Giờ)', 'Công', 'Lương Ngày', 'Thưởng CN', 'Tiền Phạt', 'Tiền OT']
     for col in num_cols:
-        display_log[col] = display_log[col].fillna(0)
+        if col in display_log.columns:
+            display_log[col] = display_log[col].fillna(0)
     
     # Ghi chú: Nếu không có giờ vào/ra thì coi là vắng
-    display_log['Ghi chú'] = full_log.apply(lambda r: '' if pd.notna(r['Check-in']) else 'Vắng/Thiếu dữ liệu', axis=1)
+    display_log['Ghi chú'] = full_log.apply(lambda r: '' if pd.notna(r.get('Check-in')) else 'Vắng/Thiếu dữ liệu', axis=1)
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -344,13 +369,16 @@ with tab1:
                             st.session_state['salary_results'], 
                             st.session_state['salary_details']
                         )
-                        st.download_button(
-                            label="📄",
-                            data=excel_data,
-                            file_name=f"Chi_tiet_{row['Tên']}_{datetime.now().strftime('%Y%m')}.xlsx",
-                            mime="application/vnd.ms-excel",
-                            key=f"dl_{row['Tên']}_{idx}_{g}"
-                        )
+                        if excel_data:
+                            st.download_button(
+                                label="📄",
+                                data=excel_data,
+                                file_name=f"Chi_tiet_{row['Tên']}_{datetime.now().strftime('%Y%m')}.xlsx",
+                                mime="application/vnd.ms-excel",
+                                key=f"dl_{row['Tên']}_{idx}_{g}"
+                            )
+                        else:
+                            st.warning("⚠️")
                     # Show Total below
                     st.markdown(f"<div style='text-align: right; font-weight: bold; color: #ff4b4b;'>Tổng Lãnh: {row['Tổng Thực Lãnh']}</div>", unsafe_allow_html=True)
                     st.divider()
@@ -458,8 +486,9 @@ with tab1:
             # 3. Chart: Chi phí theo ngày (Biến động trong tháng)
             st.subheader("📅 Biến động chi phí theo ngày")
             # Tính tổng chi phí từng ngày từ dữ liệu chi tiết
-            df_det['Date'] = pd.to_datetime(df_det['Date'])
-            df_daily = df_det.groupby('Date').agg({
+            df_det_copy = df_det.copy()
+            df_det_copy['Date'] = pd.to_datetime(df_det_copy['Date'])
+            df_daily = df_det_copy.groupby('Date').agg({
                 'Daily_Pay': 'sum',
                 'OT_Amt': 'sum',
                 'Sunday_Bonus': 'sum'
@@ -501,19 +530,20 @@ with tab1:
             """)
         
         # Prepare final data for download (sorted)
-        df_staff_info = get_staff_data()[['Name', 'Group Order']].rename(columns={'Name': 'Tên'}).drop_duplicates()
-        df_final_to_save = pd.merge(st.session_state['salary_results'], df_staff_info, on='Tên', how='left')
-        df_final_to_save = df_final_to_save.sort_values(by=['Group Order', 'Tên'])
+        if 'salary_results' in st.session_state:
+            df_staff_info = get_staff_data()[['Name', 'Group Order']].rename(columns={'Name': 'Tên'}).drop_duplicates()
+            df_final_to_save = pd.merge(st.session_state['salary_results'], df_staff_info, on='Tên', how='left')
+            df_final_to_save = df_final_to_save.sort_values(by=['Group Order', 'Tên'])
 
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df_final_to_save.to_excel(writer, index=False, sheet_name="Bảng Tổng Hợp")
-            if 'salary_details' in st.session_state:
-                st.session_state['salary_details'].to_excel(writer, index=False, sheet_name="Chi Tiết Theo Ngày")
-        
-        st.download_button(
-            label="📥 Tải xuống Bảng lương (Excel)",
-            data=output.getvalue(),
-            file_name=f"Bang_Luong_{datetime.now().strftime('%Y%m')}.xlsx",
-            mime="application/vnd.ms-excel"
-        )
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df_final_to_save.to_excel(writer, index=False, sheet_name="Bảng Tổng Hợp")
+                if 'salary_details' in st.session_state:
+                    st.session_state['salary_details'].to_excel(writer, index=False, sheet_name="Chi Tiết Theo Ngày")
+            
+            st.download_button(
+                label="📥 Tải xuống Bảng lương (Excel)",
+                data=output.getvalue(),
+                file_name=f"Bang_Luong_{datetime.now().strftime('%Y%m')}.xlsx",
+                mime="application/vnd.ms-excel"
+            )
