@@ -429,98 +429,98 @@ with tab1:
                 )
         else:
             st.info("Chưa có kết quả tính toán.")
-            
-    with tab3:
-        st.header("📊 Phân tích Chi phí Lương")
-        
-        if 'salary_results' in st.session_state and not st.session_state['salary_results'].empty:
-            df_res = st.session_state['salary_results']
-            df_det = st.session_state['salary_details']
-            
-            col_chart1, col_chart2 = st.columns(2)
-            
-            with col_chart1:
-                st.subheader("💰 Phân bổ theo Chức vụ")
-                fig_role = px.pie(
-                    df_res, values='Tổng Thực Lãnh', names='Chức vụ',
-                    hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel
-                )
-                fig_role.update_layout(margin=dict(t=0, b=0, l=0, r=0))
-                st.plotly_chart(fig_role, use_container_width=True)
-            
-            with col_chart2:
-                st.subheader("🧩 Cơ cấu Thu nhập")
-                comp_data = []
-                for _, row in df_res.iterrows():
-                    comp_data.append({'Nhân viên': row['Tên'], 'Loại': 'Lương cứng', 'Số tiền': row['Lương Ngày Thường']})
-                    comp_data.append({'Nhân viên': row['Tên'], 'Loại': 'Tiền OT', 'Số tiền': row['Tiền OT']})
-                    comp_data.append({'Nhân viên': row['Tên'], 'Loại': 'Thưởng CN', 'Số tiền': row['Lương Chủ Nhật']})
-                    if 'Hoa Hồng' in row:
-                        comp_data.append({'Nhân viên': row['Tên'], 'Loại': 'Hoa hồng', 'Số tiền': row['Hoa Hồng']})
-                
-                df_comp = pd.DataFrame(comp_data)
-                fig_comp = px.bar(
-                    df_comp, x='Nhân viên', y='Số tiền', color='Loại',
-                    barmode='stack', color_discrete_sequence=px.colors.qualitative.Safe
-                )
-                fig_comp.update_layout(xaxis_tickangle=-45, margin=dict(t=20, b=0, l=0, r=0))
-                st.plotly_chart(fig_comp, use_container_width=True)
-            
-            st.subheader("📅 Biến động chi phí theo ngày")
-            df_det_copy = df_det.copy()
-            df_det_copy['Date'] = pd.to_datetime(df_det_copy['Date'])
-            df_daily = df_det_copy.groupby('Date').agg({
-                'Daily_Pay': 'sum', 'OT_Amt': 'sum', 'Sunday_Bonus': 'sum'
-            }).reset_index()
-            
-            df_daily['Tổng chi phí'] = df_daily['Daily_Pay'] + df_daily['OT_Amt'] + df_daily['Sunday_Bonus']
-            df_daily['Ngày'] = df_daily['Date'].dt.strftime('%d/%m')
-            
-            fig_daily = px.area(
-                df_daily, x='Ngày', y='Tổng chi phí',
-                labels={'Tổng chi phí': 'Số tiền (VNĐ)'},
-                color_discrete_sequence=['#ff4b4b']
-            )
-            fig_daily.update_layout(hovermode="x unified")
-            st.plotly_chart(fig_daily, use_container_width=True)
-            
-            st.divider()
-            m1, m2, m3, m4 = st.columns(4)
-            total_fund = df_res['Tổng Thực Lãnh'].sum()
-            avg_salary = df_res['Tổng Thực Lãnh'].mean()
-            total_ot = df_res['Tiền OT'].sum()
-            total_staff = len(df_res)
-            
-            m1.metric("Tổng quỹ lương", f"{total_fund:,.0f} đ")
-            m2.metric("Số lượng nhân sự", f"{total_staff} người")
-            m3.metric("Trung bình/người", f"{avg_salary:,.0f} đ")
-            m4.metric("Tổng chi phí OT", f"{total_ot:,.0f} đ", delta=f"{(total_ot/total_fund*100):.1f}%")
 
-        else:
-            st.info("Hãy thực hiện tính toán lương ở Tab 1 để xem các biểu đồ phân tích.")
-        
-        with st.expander("💡 Giải thích ký hiệu và công thức"):
-            st.info("""
-            - **Giờ OT**: Tính từ sau 18:30 (áp dụng cho Thợ thủ công). Hệ số x1.2.
-            - **Chủ Nhật**: Tính 200% đơn giá ngày cho bộ phận Sản xuất.
-            - **Lương Giờ**: Được quy đổi từ Lương tháng / 26 ngày / 8 giờ.
-            - **Saleman**: Tính lương trực tiếp = (Giờ Out - Giờ In) * Đơn giá giờ.
-            """)
-        
-        if 'salary_results' in st.session_state and not st.session_state['salary_results'].empty:
-            df_staff_info = get_staff_data()[['Name', 'Group Order']].rename(columns={'Name': 'Tên'}).drop_duplicates()
-            df_final_to_save = pd.merge(st.session_state['salary_results'], df_staff_info, on='Tên', how='left')
-            df_final_to_save = df_final_to_save.sort_values(by=['Group Order', 'Tên'])
+with tab3:
+    st.header("📊 Phân tích Chi phí Lương")
 
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df_final_to_save.to_excel(writer, index=False, sheet_name="Bảng Tổng Hợp")
-                if 'salary_details' in st.session_state:
-                    st.session_state['salary_details'].to_excel(writer, index=False, sheet_name="Chi Tiết Theo Ngày")
-            
-            st.download_button(
-                label="📥 Tải xuống Bảng lương (Excel)",
-                data=output.getvalue(),
-                file_name=f"Bang_Luong_{datetime.now().strftime('%Y%m')}.xlsx",
-                mime="application/vnd.ms-excel"
+    if 'salary_results' in st.session_state and not st.session_state['salary_results'].empty:
+        df_res = st.session_state['salary_results']
+        df_det = st.session_state['salary_details']
+
+        col_chart1, col_chart2 = st.columns(2)
+
+        with col_chart1:
+            st.subheader("💰 Phân bổ theo Chức vụ")
+            fig_role = px.pie(
+                df_res, values='Tổng Thực Lãnh', names='Chức vụ',
+                hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel
             )
+            fig_role.update_layout(margin=dict(t=0, b=0, l=0, r=0))
+            st.plotly_chart(fig_role, use_container_width=True)
+
+        with col_chart2:
+            st.subheader("🧩 Cơ cấu Thu nhập")
+            comp_data = []
+            for _, row in df_res.iterrows():
+                comp_data.append({'Nhân viên': row['Tên'], 'Loại': 'Lương cứng', 'Số tiền': row['Lương Ngày Thường']})
+                comp_data.append({'Nhân viên': row['Tên'], 'Loại': 'Tiền OT', 'Số tiền': row['Tiền OT']})
+                comp_data.append({'Nhân viên': row['Tên'], 'Loại': 'Thưởng CN', 'Số tiền': row['Lương Chủ Nhật']})
+                if 'Hoa Hồng' in row:
+                    comp_data.append({'Nhân viên': row['Tên'], 'Loại': 'Hoa hồng', 'Số tiền': row['Hoa Hồng']})
+
+            df_comp = pd.DataFrame(comp_data)
+            fig_comp = px.bar(
+                df_comp, x='Nhân viên', y='Số tiền', color='Loại',
+                barmode='stack', color_discrete_sequence=px.colors.qualitative.Safe
+            )
+            fig_comp.update_layout(xaxis_tickangle=-45, margin=dict(t=20, b=0, l=0, r=0))
+            st.plotly_chart(fig_comp, use_container_width=True)
+
+        st.subheader("📅 Biến động chi phí theo ngày")
+        df_det_copy = df_det.copy()
+        df_det_copy['Date'] = pd.to_datetime(df_det_copy['Date'])
+        df_daily = df_det_copy.groupby('Date').agg({
+            'Daily_Pay': 'sum', 'OT_Amt': 'sum', 'Sunday_Bonus': 'sum'
+        }).reset_index()
+
+        df_daily['Tổng chi phí'] = df_daily['Daily_Pay'] + df_daily['OT_Amt'] + df_daily['Sunday_Bonus']
+        df_daily['Ngày'] = df_daily['Date'].dt.strftime('%d/%m')
+
+        fig_daily = px.area(
+            df_daily, x='Ngày', y='Tổng chi phí',
+            labels={'Tổng chi phí': 'Số tiền (VNĐ)'},
+            color_discrete_sequence=['#ff4b4b']
+        )
+        fig_daily.update_layout(hovermode="x unified")
+        st.plotly_chart(fig_daily, use_container_width=True)
+
+        st.divider()
+        m1, m2, m3, m4 = st.columns(4)
+        total_fund = df_res['Tổng Thực Lãnh'].sum()
+        avg_salary = df_res['Tổng Thực Lãnh'].mean()
+        total_ot = df_res['Tiền OT'].sum()
+        total_staff = len(df_res)
+
+        m1.metric("Tổng quỹ lương", f"{total_fund:,.0f} đ")
+        m2.metric("Số lượng nhân sự", f"{total_staff} người")
+        m3.metric("Trung bình/người", f"{avg_salary:,.0f} đ")
+        m4.metric("Tổng chi phí OT", f"{total_ot:,.0f} đ", delta=f"{(total_ot/total_fund*100):.1f}%")
+
+    else:
+        st.info("Hãy thực hiện tính toán lương ở Tab 1 để xem các biểu đồ phân tích.")
+
+    with st.expander("💡 Giải thích ký hiệu và công thức"):
+        st.info("""
+        - **Giờ OT**: Tính từ sau 18:30 (áp dụng cho Thợ thủ công). Hệ số x1.2.
+        - **Chủ Nhật**: Tính 200% đơn giá ngày cho bộ phận Sản xuất.
+        - **Lương Giờ**: Được quy đổi từ Lương tháng / 26 ngày / 8 giờ.
+        - **Saleman**: Tính lương trực tiếp = (Giờ Out - Giờ In) * Đơn giá giờ.
+        """)
+
+    if 'salary_results' in st.session_state and not st.session_state['salary_results'].empty:
+        df_staff_info = get_staff_data()[['Name', 'Group Order']].rename(columns={'Name': 'Tên'}).drop_duplicates()
+        df_final_to_save = pd.merge(st.session_state['salary_results'], df_staff_info, on='Tên', how='left')
+        df_final_to_save = df_final_to_save.sort_values(by=['Group Order', 'Tên'])
+
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df_final_to_save.to_excel(writer, index=False, sheet_name="Bảng Tổng Hợp")
+            if 'salary_details' in st.session_state:
+                st.session_state['salary_details'].to_excel(writer, index=False, sheet_name="Chi Tiết Theo Ngày")
+
+        st.download_button(
+            label="📥 Tải xuống Bảng lương (Excel)",
+            data=output.getvalue(),
+            file_name=f"Bang_Luong_{datetime.now().strftime('%Y%m')}.xlsx",
+            mime="application/vnd.ms-excel"
+        )
