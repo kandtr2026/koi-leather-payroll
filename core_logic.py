@@ -141,15 +141,15 @@ class SalaryCalculator:
         for r in range(header_row_idx + 1, len(df_raw)):
             row_data = df_raw.iloc[r]
             if len(row_data) <= name_col: continue
-            emp_name = str(row_data[name_col]).strip()
+            emp_name = str(row_data.iloc[name_col]).strip()
             if not emp_name or emp_name.lower() in ['nan', 'none', '']: continue
-            
+
             # Duyệt các cặp cột (Vào - Ra)
             for c in range(int(start_time_col), len(df_raw.columns) - 1, 2):
                 current_date_str = col_to_date.get(int(c))
-                
-                check_in = row_data[int(c)]
-                check_out = row_data[int(c) + 1]
+
+                check_in = row_data.iloc[int(c)]
+                check_out = row_data.iloc[int(c) + 1]
                 
                 def is_valid(v):
                     if pd.isna(v): return False
